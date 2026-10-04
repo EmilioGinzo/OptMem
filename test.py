@@ -14,10 +14,14 @@ import subprocess
 import sys
 import tempfile
 from importlib.machinery import SourceFileLoader
+from importlib.util import spec_from_loader, module_from_spec
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 MEMO = os.path.join(HERE, "memo")
-cli = SourceFileLoader("memo_cli", MEMO).load_module()
+loader = SourceFileLoader("memo_cli", MEMO)
+spec = spec_from_loader(loader.name, loader)
+cli = module_from_spec(spec)
+loader.exec_module(cli)
 cover = cli.cover
 
 
@@ -122,14 +126,15 @@ def run(*args, store=None):
 
 def nap_id(out):
     """The block id from the command a nap prompt offers."""
-    m = re.search(r"memo nap (\d+)-(\d+)", out)
+    m = re.search(r" nap (\d+)-(\d+)", out)
     return "%s-%s" % m.groups() if m else None
 
 
 def offered(out):
     """The line offering a command. Every command handed to an agent must be
     an order, not a label: `Run: memo ...`, never `next: memo ...`."""
-    return [l for l in out.splitlines() if "memo nap " in l or "memo wake " in l]
+    return [l for l in out.splitlines()
+            if cli.ME + " nap " in l or cli.ME + " wake " in l]
 
 
 # the real entry point still has to work: shebang, argv parsing, exit code
@@ -149,8 +154,10 @@ check(not os.path.exists(d + "-typo"), "a missing MEMORY_DIR was created")
 # prints the paste block, and is idempotent
 fresh = {k: v for k, v in os.environ.items() if k != "MEMORY_DIR"}
 fresh["HOME"] = tempfile.mkdtemp()
+# expanduser uses USERPROFILE on Windows. Never touch the real user's store.
+fresh["USERPROFILE"] = fresh["HOME"]
 noenv = subprocess.run(memo + ["wake"], capture_output=True, text=True, env=fresh)
-check(noenv.returncode == 1 and "memo init" in noenv.stderr,
+check(noenv.returncode == 1 and " init" in noenv.stderr,
       "with no MEMORY_DIR and no memory, wake must point at init")
 init = subprocess.run(memo + ["init"], capture_output=True, text=True, env=fresh)
 check(init.returncode == 0 and "## Memory" in init.stdout
@@ -173,11 +180,21 @@ asked = subprocess.run(memo + ["note", "the second thing that happened"],
                        env=bare, capture_output=True, text=True)
 order = [l[5:] for l in asked.stdout.splitlines() if l.startswith("Run: ")]
 check(len(order) == 1, "note did not order a compression: " + asked.stdout)
-obeyed = subprocess.run(order[0].replace('"<your line>"', '"both things"'),
-                        shell=True, env=bare, capture_output=True, text=True)
-check(obeyed.returncode == 0 and "saved" in obeyed.stdout,
-      "the order the tool printed does not run with nothing on PATH: %r -> %s"
-      % (order[0], obeyed.stderr.strip()))
+if os.name != "nt":
+    obeyed = subprocess.run(order[0].replace('"<your line>"', '"both things"'),
+                            shell=True, env=bare, capture_output=True, text=True)
+    check(obeyed.returncode == 0 and "saved" in obeyed.stdout,
+          "the order the tool printed does not run with nothing on PATH: %r -> %s"
+          % (order[0], obeyed.stderr.strip()))
+else:
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    check(bool(shell), "PowerShell is required to verify printed Windows commands")
+    if shell:
+        obeyed = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command",
+                                 order[0].replace('"<your line>"', '"both things"')],
+                                env=bare, capture_output=True, text=True)
+        check(obeyed.returncode == 0 and "saved" in obeyed.stdout,
+              "printed PowerShell command failed: " + obeyed.stdout + obeyed.stderr)
 
 # a size written by hand into `config` must not brick the tool with a
 # recovery that is itself broken: name the file and the line
@@ -196,7 +213,7 @@ open(badcfg, "w").write("")
 r_ = subprocess.run(memo + ["init"], capture_output=True, text=True,
                     env=dict(fresh, MEMORY_DIR=MEMO))   # a file, not a store
 check(r_.returncode == 1 and "Traceback" not in r_.stderr
-      and "Not a directory" in r_.stderr,
+      and ("Not a directory" in r_.stderr or os.name == "nt"),
       "a filesystem error printed a traceback: " + r_.stderr)
 
 
@@ -272,7 +289,7 @@ lines = [l for p in parts for l in p]
 check(len(lines) == WAKE_LINES, "woke with %d lines, want %d" % (len(lines), WAKE_LINES))
 check(lines[-1].startswith("#%d " % (N - 1)), "newest memory not last / not raw")
 check(lines[0].startswith("#0-"), "oldest line should be a summary block")
-check(re.search(r"Run: \S*memo wake 2", run("wake").stdout),
+check(re.search(r"Run: .+ wake 2", run("wake").stdout),
       "part 1 must ORDER the next command, not label it")
 check("You are awake." in run("wake", str(len(parts))).stdout,
       "last part must say it is last")
@@ -346,7 +363,7 @@ check(run("zoom", "9-3").returncode == 1, "zoom accepted a backwards range")
 check(run("zoom").returncode == 1, "zoom with no id must show usage")
 r = run("zoom", "1048576-2097151")
 check(r.returncode == 1 and "beyond the memory" in r.stderr
-      and "memo wake" in r.stderr, "zoom past the end must name a way back")
+      and " wake" in r.stderr, "zoom past the end must name a way back")
 
 
 def treesize():
@@ -507,13 +524,16 @@ check(r.returncode == 1 and "forget 0-1" in r.stderr
 
 # an unreadable level is a filesystem failure and must surface as one --
 # reading it as "not compressed yet" offers work that cannot be done
-os.chmod(os.path.join(d3, "TREE", "2"), 0)
-r_ = subprocess.run(memo + ["wake"], capture_output=True, text=True,
-                    env=dict(os.environ, MEMORY_DIR=d3))
-check(r_.returncode == 1 and "Permission denied" in r_.stderr
-      and "not compressed" not in r_.stdout,
-      "an unreadable level was read as pending work: " + r_.stdout + r_.stderr)
-os.chmod(os.path.join(d3, "TREE", "2"), 0o644)
+if os.name != "nt":
+    os.chmod(os.path.join(d3, "TREE", "2"), 0)
+    r_ = subprocess.run(memo + ["wake"], capture_output=True, text=True,
+                        env=dict(os.environ, MEMORY_DIR=d3))
+    check(r_.returncode == 1 and "Permission denied" in r_.stderr
+          and "not compressed" not in r_.stdout,
+          "an unreadable level was read as pending work: " + r_.stdout + r_.stderr)
+    os.chmod(os.path.join(d3, "TREE", "2"), 0o644)
+else:
+    print("SKIP: POSIX chmod permission semantics.")
 
 # an impossible calendar date would poison every later import: the store's
 # order check compares against it forever
