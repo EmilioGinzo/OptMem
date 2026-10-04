@@ -1,9 +1,32 @@
 # OptMem
 
-Selective memory for AI agents, based on [VictorTaelin/OptMem](https://github.com/VictorTaelin/OptMem).
+### Remember what helps future work; keep current facts consistent.
 
-This feature branch keeps the original log and summary tree while adding evidence-backed
-admission, scoped updates, duplicate retry protection, and a current-memory view.
+An independent fork of [VictorTaelin/OptMem](https://github.com/VictorTaelin/OptMem).
+
+## How this fork differs
+
+The original provides an append-only memory log and a binary summary tree. This
+fork preserves that architecture and adds a selective retention workflow:
+
+- **Evidence and future use:** `retain` requires a source, a concrete reason to
+  keep the information, certainty, and a stable scoped key. Task/transient
+  candidates are not added to durable memory.
+- **Consistent updates:** exact duplicate retries add nothing; corrections and
+  changed decisions supersede the previous version of the same key.
+- **Current views, intact history:** `wake --current` and `recall --current`
+  resolve keyed updates without stale summaries. Raw history remains intact;
+  legacy notes stay visible as unreviewed.
+
+Agents must adopt the new Memory prompt and `retain` workflow; existing `note`
+integrations keep their old behavior. The agent still judges usefulness and
+evidence—the tool enforces the contract, not a universal automatic classifier.
+
+**Linux and Windows validated:** at [e8541e3](https://github.com/EmilioGinzo/OptMem/commit/e8541e31ad7d79198705c817a8d7f8ab7ac12d64),
+18 retention tests and 109,099 upstream checks passed on each platform. Native
+Linux (Python 3.12.14, non-root) had no skips; native Windows skipped only the
+POSIX permission check.
+
 See [RETENTION.md](RETENTION.md) for policy, examples, compatibility, and limits.
 
 ![how OptMem works](anim/optmem.gif)
